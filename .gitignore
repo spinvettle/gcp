@@ -28,6 +28,9 @@ Thumbs.db
 # 测试相关
 coverage.out
 profile.out
+*.test
+cpu.out
+mem.out
 
 # 依赖管理（如果使用 vendor）
 /vendor/
