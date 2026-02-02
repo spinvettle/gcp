@@ -18,16 +18,25 @@ type Pool struct {
 	panicHandlerFn   func(any)
 	mu               sync.Mutex
 	wg               sync.WaitGroup
+	workerCachePool  sync.Pool
 }
 
-func New(capacity int32) *Pool {
+func New(capacity int32) (*Pool, error) {
 	if capacity <= 0 {
-		return nil
+		return nil, InvalidCapacityError
 	}
-	return &Pool{
+	p := &Pool{
 		capacity:         capacity,
-		availableWorkers: make([]*Worker, capacity),
+		timeout:          time.Millisecond * 100,
+		availableWorkers: make([]*Worker, 0, capacity),
 	}
+
+	p.workerCachePool.New = func() any {
+		return &Worker{
+			pool:      p,
+			taskQueue: make(chan Task, 1)}
+	}
+	return p, nil
 }
 
 func (p *Pool) putWorker(w *Worker) error {
@@ -65,9 +74,11 @@ func (p *Pool) Submit(task Task) error {
 			return PoolFullError
 		}
 
+		// w = p.workerCachePool.Get().(*Worker)
 		w = &Worker{
 			pool:      p,
-			taskQueue: make(chan Task, 1)}
+			taskQueue: make(chan Task, 1),
+		}
 		p.wg.Add(1)
 		go w.run()
 		w.taskQueue <- task
@@ -96,7 +107,6 @@ func Capacity(capacity int32) Options {
 type Worker struct {
 	pool      *Pool
 	taskQueue chan Task
-	lastTime  time.Time
 }
 
 func (w *Worker) run() {
@@ -112,19 +122,28 @@ func (w *Worker) run() {
 		}
 
 	}()
+	timer := time.NewTimer(w.pool.timeout)
+	defer timer.Stop()
 
 	for {
 		select {
 		case task := <-w.taskQueue:
 			task()
-			w.lastTime = time.Now()
-			err := w.putBackPool() //用完放回
-			if err != nil {        //放回失败
+			if !timer.Stop() { //如果C有旧值，需要清空
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(w.pool.timeout) //重置timer
+			err := w.putBackPool()      //用完放回
+			if err != nil {             //放回失败
 				return
 			}
 
-		case <-time.After(w.pool.timeout):
-			//超时销毁
+		case <-timer.C:
+			//超时销毁，动态缩容
+			// w.pool.workerCachePool.Put(w) //放回sync.Pool
 			return
 		}
 	}
